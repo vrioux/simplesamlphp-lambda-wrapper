@@ -1,0 +1,133 @@
+service: app
+
+provider:
+    name: aws
+    region: us-east-1
+    runtime: provided.al2
+
+plugins:
+    - ./vendor/bref/bref
+
+functions:
+    api:
+        handler: index.php
+        description: ''
+        timeout: 28 # in seconds (API Gateway has a timeout of 29 seconds)
+        layers:
+            - ${bref:layer.php-74-fpm}
+        events:
+            - httpApi: '*'
+        vpc:
+            securityGroupIds:
+              - point-to-lambda-sg
+            subnetIds:
+              - point-to-lambda-vpc-subnet-ids
+
+# Exclude files from deployment
+package:
+    patterns:
+        - '!node_modules/**'
+        - '!tests/**'
+        
+resources:
+    Resources:
+        S3Bucket:
+            Type: AWS::S3::Bucket
+            Properties:
+                BucketName: generate-your-own-bucket-name
+    
+        CloudFrontOriginAccessIdentity:
+            Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+            Properties:
+              CloudFrontOriginAccessIdentityConfig:
+                Comment: !Sub 'CloudFront OAI for ${S3Bucket}'
+
+        S3BucketPolicy:
+            Type: AWS::S3::BucketPolicy
+            DependsOn: CloudFrontOriginAccessIdentity
+            Properties:
+                Bucket: !Ref S3Bucket
+                PolicyDocument:
+                    Version: '2012-10-17'
+                    Statement:
+                        - Effect: Allow
+                          Action:
+                            - s3:GetObject
+                          Resource: !Join
+                            - ""
+                            - - !GetAtt S3Bucket.Arn
+                              - "/*"
+                          Principal:
+                            CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+
+        CloudFrontDistro:
+                Type: AWS::CloudFront::Distribution
+                Properties:
+                    DistributionConfig:
+                        Enabled: true
+                        PriceClass: PriceClass_100
+                        HttpVersion: http2
+                        Origins:
+                            # Lambda
+                            -   Id: SimplesamlLambda
+                                DomainName: !Join ['.', [!Ref HttpApi, 'execute-api', !Ref AWS::Region, 'amazonaws.com']]
+                                CustomOriginConfig:
+                                    OriginProtocolPolicy: 'https-only'
+                                OriginCustomHeaders:
+                                    -   HeaderName: 'X-Forwarded-Host'
+                                        HeaderValue: 'abc.cloudfront.net'
+                            # The assets (S3)
+                            -   Id: SimplesamlStatic
+                                DomainName: !Sub '${S3Bucket}.s3.amazonaws.com'
+                                S3OriginConfig:
+                                    OriginAccessIdentity: !Join [ "", [ "origin-access-identity/cloudfront/", !Ref CloudFrontOriginAccessIdentity ] ]
+                        # The default behavior is to send everything to AWS Lambda
+                        DefaultCacheBehavior:
+                            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+                            TargetOriginId: SimplesamlLambda
+                            # Disable caching for the PHP application https://aws.amazon.com/premiumsupport/knowledge-center/prevent-cloudfront-from-caching-files/
+                            DefaultTTL: 0
+                            MinTTL: 0
+                            MaxTTL: 0
+                            # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-cloudfront-distribution-forwardedvalues.html
+                            ForwardedValues:
+                                QueryString: true
+                                Cookies:
+                                    Forward: all # Forward cookies to use them in PHP
+                                # We must *not* forward the `Host` header else it messes up API Gateway
+                                Headers:
+                                    - 'Accept'
+                                    - 'Accept-Encoding'
+                                    - 'Accept-Language'
+                                    - 'Authorization'
+                                    - 'Origin'
+                                    - 'Referer'
+                            # CloudFront will force HTTPS on visitors (which is more secure)
+                            ViewerProtocolPolicy: redirect-to-https
+                        CacheBehaviors:
+                            -   PathPattern: 'resources/*'
+                                TargetOriginId: SimplesamlStatic # the static files on S3
+                                AllowedMethods: [GET, HEAD]
+                                ForwardedValues:
+                                    # No need for all that with assets
+                                    QueryString: 'false'
+                                    Cookies:
+                                        Forward: none
+                                ViewerProtocolPolicy: redirect-to-https
+                                Compress: true # Serve files with gzip for browsers that support it (https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/ServingCompressedFiles.html)
+                            -   PathPattern: 'assets/*'
+                                TargetOriginId: SimplesamlStatic # the static files on S3
+                                AllowedMethods: [GET, HEAD]
+                                ForwardedValues:
+                                    # No need for all that with assets
+                                    QueryString: 'false'
+                                    Cookies:
+                                        Forward: none
+                                ViewerProtocolPolicy: redirect-to-https
+                                Compress: true # Serve files with gzip for browsers that support it (https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/ServingCompressedFiles.html)
+                        CustomErrorResponses:
+                            # Force CloudFront to not cache HTTP errors
+                            -   ErrorCode: 500
+                                ErrorCachingMinTTL: 0
+                            -   ErrorCode: 504
+                                ErrorCachingMinTTL: 0
