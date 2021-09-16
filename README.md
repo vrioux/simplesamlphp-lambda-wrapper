@@ -1,7 +1,7 @@
 # simplesamlphp-lambda-wrapper
 AWS Lambda Wrapper for deploying SimpleSAMLphp as a Lambda function using Bref
 
-!! Tested only with SimpleSAMLphp 1.19 !!
+> :warning: **Not really tested**: Tested only with SimpleSAMLphp 1.19
 
 Usage:
 * Clone this somewhere
